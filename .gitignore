@@ -1,5 +1,7 @@
-*.iml
-/prometheustosignalfx
-/cmd/prometheustosfx/prometheustosfx
-tags
-prometheustosfx
+/.*-stamp
+/signalfx-cadvisord
+*.bak
+/Docker/signalfx-cadvisord
+*.test
+/k8s/*-production.yaml
+/k8s/*-development.yaml
