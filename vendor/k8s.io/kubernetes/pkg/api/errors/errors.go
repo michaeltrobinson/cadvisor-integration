@@ -24,7 +24,8 @@ import (
 
 	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/runtime"
-	"k8s.io/kubernetes/pkg/util/validation"
+	"k8s.io/kubernetes/pkg/util/errors"
+	"k8s.io/kubernetes/pkg/util/fielderrors"
 )
 
 // HTTP Status codes not in the golang http package.
@@ -158,15 +159,16 @@ func NewConflict(kind, name string, err error) error {
 }
 
 // NewInvalid returns an error indicating the item is invalid and cannot be processed.
-func NewInvalid(kind, name string, errs validation.ErrorList) error {
+func NewInvalid(kind, name string, errs fielderrors.ValidationErrorList) error {
 	causes := make([]unversioned.StatusCause, 0, len(errs))
 	for i := range errs {
-		err := errs[i]
-		causes = append(causes, unversioned.StatusCause{
-			Type:    unversioned.CauseType(err.Type),
-			Message: err.ErrorBody(),
-			Field:   err.Field,
-		})
+		if err, ok := errs[i].(*fielderrors.ValidationError); ok {
+			causes = append(causes, unversioned.StatusCause{
+				Type:    unversioned.CauseType(err.Type),
+				Message: err.ErrorBody(),
+				Field:   err.Field,
+			})
+		}
 	}
 	return &StatusError{unversioned.Status{
 		Status: unversioned.StatusFailure,
@@ -177,7 +179,7 @@ func NewInvalid(kind, name string, errs validation.ErrorList) error {
 			Name:   name,
 			Causes: causes,
 		},
-		Message: fmt.Sprintf("%s %q is invalid: %v", kind, name, errs.ToAggregate()),
+		Message: fmt.Sprintf("%s %q is invalid: %v", kind, name, errors.NewAggregate(errs)),
 	}}
 }
 

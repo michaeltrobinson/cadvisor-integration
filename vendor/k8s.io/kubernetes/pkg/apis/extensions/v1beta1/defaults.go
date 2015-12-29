@@ -18,7 +18,7 @@ package v1beta1
 
 import (
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/util/intstr"
+	"k8s.io/kubernetes/pkg/util"
 )
 
 func addDefaultingFuncs() {
@@ -35,10 +35,8 @@ func addDefaultingFuncs() {
 			}
 			// TODO: support templates defined elsewhere when we support them in the API
 			if labels != nil {
-				if obj.Spec.Selector == nil {
-					obj.Spec.Selector = &PodSelector{
-						MatchLabels: labels,
-					}
+				if len(obj.Spec.Selector) == 0 {
+					obj.Spec.Selector = labels
 				}
 				if len(obj.Labels) == 0 {
 					obj.Labels = labels
@@ -47,8 +45,10 @@ func addDefaultingFuncs() {
 		},
 		func(obj *Deployment) {
 			// Default labels and selector to labels from pod template spec.
-			labels := obj.Spec.Template.Labels
-
+			var labels map[string]string
+			if obj.Spec.Template != nil {
+				labels = obj.Spec.Template.Labels
+			}
 			if labels != nil {
 				if len(obj.Spec.Selector) == 0 {
 					obj.Spec.Selector = labels
@@ -74,12 +74,12 @@ func addDefaultingFuncs() {
 				}
 				if strategy.RollingUpdate.MaxUnavailable == nil {
 					// Set default MaxUnavailable as 1 by default.
-					maxUnavailable := intstr.FromInt(1)
+					maxUnavailable := util.NewIntOrStringFromInt(1)
 					strategy.RollingUpdate.MaxUnavailable = &maxUnavailable
 				}
 				if strategy.RollingUpdate.MaxSurge == nil {
 					// Set default MaxSurge as 1 by default.
-					maxSurge := intstr.FromInt(1)
+					maxSurge := util.NewIntOrStringFromInt(1)
 					strategy.RollingUpdate.MaxSurge = &maxSurge
 				}
 			}

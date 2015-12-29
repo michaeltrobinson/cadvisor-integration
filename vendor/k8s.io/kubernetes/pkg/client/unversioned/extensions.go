@@ -64,7 +64,7 @@ func (c *ExtensionsClient) ServerVersion() (*version.Info, error) {
 // ServerAPIVersions retrieves and parses the list of experimental API versions the
 // server supports.
 func (c *ExtensionsClient) ServerAPIVersions() (*unversioned.APIVersions, error) {
-	body, err := c.Get().AbsPath("/apis/extensions").Do().Raw()
+	body, err := c.Get().UnversionedPath("").Do().Raw()
 	if err != nil {
 		return nil, err
 	}
@@ -140,17 +140,13 @@ func setExtensionsDefaults(config *Config) error {
 	}
 	// TODO: Unconditionally set the config.Version, until we fix the config.
 	//if config.Version == "" {
-	gv, err := unversioned.ParseGroupVersion(g.GroupVersion)
-	if err != nil {
-		return err
-	}
-	config.GroupVersion = &gv
+	config.Version = g.GroupVersion
 	//}
 
-	versionInterfaces, err := g.InterfacesFor(config.GroupVersion.String())
+	versionInterfaces, err := g.InterfacesFor(config.Version)
 	if err != nil {
-		return fmt.Errorf("Extensions API group/version '%v' is not recognized (valid values: %s)",
-			config.GroupVersion, strings.Join(latest.GroupOrDie("extensions").Versions, ", "))
+		return fmt.Errorf("Extensions API version '%s' is not recognized (valid values: %s)",
+			config.Version, strings.Join(latest.GroupOrDie("extensions").Versions, ", "))
 	}
 	config.Codec = versionInterfaces.Codec
 	if config.QPS == 0 {
