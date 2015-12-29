@@ -44,6 +44,9 @@ var (
 	sendInterval      time.Duration
 	cadvisorPort      int
 	discoveryInterval time.Duration
+
+	kubeUser string
+	kubePass string
 )
 
 // Config for prometheusScraper
@@ -87,7 +90,7 @@ type cadvisorInfoProvider struct {
 }
 
 func (cip *cadvisorInfoProvider) SubcontainersInfo(containerName string, query *info.ContainerInfoRequest) ([]*info.ContainerInfo, error) {
-	infos, err := cip.cc.AllDockerContainers(&info.ContainerInfoRequest{NumStats: 3})
+	infos, err := cip.cc.SubcontainersInfo(containerName, &info.ContainerInfoRequest{NumStats: 3})
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +162,16 @@ func init() {
 				Value:  time.Minute * 5,
 				Usage:  "Rate at which nodes and services will be rediscovered",
 			},
+			cli.StringFlag{
+				Name:   "kube-user",
+				EnvVar: "KUBE_USER",
+				Usage:  "Username to authenticate to kubernetes api",
+			},
+			cli.StringFlag{
+				Name:   "kube-pass",
+				EnvVar: "KUBE_PASS",
+				Usage:  "Password to authenticate to kubernetes api",
+			},
 		},
 	})
 }
@@ -183,6 +196,13 @@ func setupRun(c *cli.Context) error {
 	sendInterval = c.Duration("send-interval")
 	cadvisorPort = c.Int("cadvisor-port")
 	discoveryInterval = c.Duration("discovery-interval")
+
+	kubeUser = c.String("kube-user")
+	kubePass = c.String("kube-pass")
+	if kubeUser == "" || kubePass == "" {
+		cli.ShowAppHelp(c)
+		log.Fatal("kubernetes credentials are required")
+	}
 	return nil
 }
 
@@ -226,12 +246,19 @@ func nameToLabel(name string) map[string]string {
 	return extraLabels
 }
 
+func replaceAuth(kubeCfg *kube.Config) {
+	kubeCfg.BearerToken = ""
+	kubeCfg.Username = kubeUser
+	kubeCfg.Password = kubePass
+}
+
 func updateNodes(cPort int) (hostIPtoNodeMap map[string]kubeAPI.Node, nodeIPs []string) {
 	kubeCfg, err := kube.InClusterConfig()
 	if err != nil {
 		log.WithError(err).Error("failed to create kube config")
 		return nil, nil
 	}
+	replaceAuth(kubeCfg)
 	log.WithField("host", kubeCfg.Host).Info("connecting to kube api")
 	kubeClient, kubeErr := kube.New(kubeCfg)
 	if kubeErr != nil {
@@ -245,6 +272,7 @@ func updateNodes(cPort int) (hostIPtoNodeMap map[string]kubeAPI.Node, nodeIPs []
 	if apiErr != nil {
 		log.WithError(apiErr).Error("failed to get node list")
 	} else {
+		log.WithField("num", len(nodeList.Items)).Info("found nodes")
 		for _, node := range nodeList.Items {
 			var hostIP string
 			for _, nodeAddress := range node.Status.Addresses {
@@ -273,6 +301,7 @@ func updateServices() (podToServiceMap map[string]string) {
 		log.WithError(err).Error("failed to create kube config")
 		return nil
 	}
+	replaceAuth(kubeCfg)
 	log.WithField("host", kubeCfg.Host).Info("connecting to kube api")
 	kubeClient, kubeErr := kube.New(kubeCfg)
 	if kubeErr != nil {
@@ -285,6 +314,7 @@ func updateServices() (podToServiceMap map[string]string) {
 		log.WithError(apiErr).Error("failed to get service list")
 		return nil
 	}
+	log.WithField("num", len(serviceList.Items)).Info("found services")
 
 	podToServiceMap = make(map[string]string, 2)
 	for _, service := range serviceList.Items {
@@ -292,6 +322,10 @@ func updateServices() (podToServiceMap map[string]string) {
 		if apiErr != nil {
 			log.WithError(apiErr).Error("failed to get pod list")
 		} else {
+			log.WithFields(log.Fields{
+				"service": service.ObjectMeta.Name,
+				"num":     len(podList.Items),
+			}).Info("found pods")
 			for _, pod := range podList.Items {
 				podToServiceMap[pod.ObjectMeta.Name] = service.ObjectMeta.Name
 			}
@@ -545,16 +579,20 @@ func (swc *scrapWorkCache) waitAndForward() {
 			}
 		}
 
-		metricName := prometheusMetric.Desc().String()
+		metricName := prometheusMetric.Desc().MetricName()
 		timestamp := time.Unix(0, tsMs*time.Millisecond.Nanoseconds())
 
 		for _, conv := range scrapper.ConvertMeric(&pMetric) {
 			dp := datapoint.New(metricName+conv.MetricNameSuffix, scrapper.AppendDims(dims, conv.ExtraDims), conv.Value, conv.MType, timestamp)
+			log.WithField("name", metricName+conv.MetricNameSuffix).Debug("adding datapoint")
 			ret[i] = dp
 			i++
 			if i == maxDatapoints {
 				sort.Sort(sortableDatapoint(ret))
-				swc.forwarder.AddDatapoints(ctx, ret)
+				log.WithField("num", maxDatapoints).Info("forwarding datapoints")
+				if err := swc.forwarder.AddDatapoints(ctx, ret); err != nil {
+					log.WithError(err).Error("failed to forward datapoints")
+				}
 				i = 0
 			}
 		}
