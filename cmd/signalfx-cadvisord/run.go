@@ -1,58 +1,59 @@
 package main
 
 import (
-	//"bytes"
+	"errors"
 	"fmt"
-	"os"
+	"net/url"
 	"reflect"
 	"regexp"
+	"runtime"
 	"sort"
-	//"strconv"
-	"errors"
 	"strings"
 	"sync"
 	"time"
 
-	//	"net/http"
-	"net/url"
-
-	//	"log"
-
-	"encoding/json"
-	"runtime"
-
-	"golang.org/x/net/context"
-
-	"github.com/signalfx/cadvisor-integration/scrapper"
-	"github.com/signalfx/golib/datapoint"
-	"github.com/signalfx/metricproxy/protocol/signalfx"
-
 	"github.com/codegangsta/cli"
 	"github.com/goinggo/workpool"
+	"github.com/google/cadvisor/client"
+	"github.com/google/cadvisor/metrics"
+	"github.com/michaeltrobinson/cadvisor-integration/scrapper"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/signalfx/golib/datapoint"
+	"github.com/signalfx/metricproxy/protocol/signalfx"
+	"golang.org/x/net/context"
+
 	kubeAPI "k8s.io/kubernetes/pkg/api"
 	kube "k8s.io/kubernetes/pkg/client/unversioned"
 	kubeFields "k8s.io/kubernetes/pkg/fields"
 	kubeLabels "k8s.io/kubernetes/pkg/labels"
 
-	//"github.com/fatih/structs"
-	"github.com/google/cadvisor/client"
+	log "github.com/Sirupsen/logrus"
 	info "github.com/google/cadvisor/info/v1"
-	"github.com/google/cadvisor/metrics"
-	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 )
 
-// Set by build system
-var toolVersion = "NOT SET"
+const maxDatapoints = 50
+
+var (
+	re             *regexp.Regexp
+	reCaptureNames []string
+
+	sfxAPIToken       string
+	sfxIngestURL      string
+	clusterName       string
+	sendInterval      time.Duration
+	cadvisorPort      int
+	discoveryInterval time.Duration
+)
 
 // Config for prometheusScraper
 type Config struct {
 	IngestURL              string
 	CadvisorURL            []string
 	APIToken               string
-	DataSendRate           string
+	DataSendRate           time.Duration
 	ClusterName            string
-	NodeServiceRefreshRate string
+	NodeServiceRefreshRate time.Duration
 	CadvisorPort           int
 }
 
@@ -85,8 +86,17 @@ type cadvisorInfoProvider struct {
 	cc *client.Client
 }
 
-func (cip *cadvisorInfoProvider) SubcontainersInfo(containerName string, query *info.ContainerInfoRequest) ([]info.ContainerInfo, error) {
-	return cip.cc.AllDockerContainers(&info.ContainerInfoRequest{NumStats: 3}) //&info.ContainerInfoRequest{NumStats: 10, Start: time.Unix(0, time.Now().UnixNano()-10*time.Second.Nanoseconds())})
+func (cip *cadvisorInfoProvider) SubcontainersInfo(containerName string, query *info.ContainerInfoRequest) ([]*info.ContainerInfo, error) {
+	infos, err := cip.cc.AllDockerContainers(&info.ContainerInfoRequest{NumStats: 3})
+	if err != nil {
+		return nil, err
+	}
+	ret := make([]*info.ContainerInfo, len(infos))
+	for i, info := range infos {
+		containerInfo := info
+		ret[i] = &containerInfo
+	}
+	return ret, nil
 }
 
 func (cip *cadvisorInfoProvider) GetVersionInfo() (*info.VersionInfo, error) {
@@ -104,143 +114,94 @@ func (cip *cadvisorInfoProvider) GetMachineInfo() (*info.MachineInfo, error) {
 	return cip.cc.MachineInfo()
 }
 
-const maxDatapoints = 50
-
 func (scrapWork *scrapWork2) DoWork(workRoutine int) {
 	scrapWork.collector.Collect(scrapWork.chRecvOnly)
 }
 
-const ingestURL = "ingestURL"
-const apiToken = "apiToken"
-const dataSendRate = "sendRate"
-const nodeServiceDiscoveryRate = "nodeServiceDiscoveryRate"
-const clusterName = "clusterName"
-const cadvisorPort = "cadvisorPort"
-
-var dataSendRates = map[string]time.Duration{
-	"1s":  time.Second,
-	"5s":  5 * time.Second,
-	"10s": 10 * time.Second,
-	"30s": 30 * time.Second,
-	"1m":  time.Minute,
-	"5m":  5 * time.Minute,
-	"1h":  time.Hour,
-}
-
-var nodeServiceDiscoveryRates = map[string]time.Duration{
-	"3m":  3 * time.Minute,
-	"5m":  5 * time.Minute,
-	"10m": 10 * time.Minute,
-	"15m": 15 * time.Minute,
-	"20m": 20 * time.Minute,
-}
-
-func printVersion() {
-	fmt.Printf("git build commit: %v\n", toolVersion)
-}
-
-func main() {
-	app := cli.NewApp()
-	app.Name = "prometheustosfx"
-	app.Usage = "scraps metrics from cAdvisor and forwards them to SignalFx."
-	app.Version = "git commit: " + toolVersion
-
-	app.Flags = []cli.Flag{
-
-		cli.StringFlag{
-			Name:  ingestURL,
-			Value: "https://ingest.signalfx.com",
-			Usage: "SignalFx ingest URL.",
-		},
-		cli.StringFlag{
-			Name:   apiToken,
-			Usage:  "API token.",
-			EnvVar: "SFX_SCRAPPER_API_TOKEN",
-		},
-		cli.StringFlag{
-			Name:   clusterName,
-			Usage:  "Cluster name will appear as dimension.",
-			EnvVar: "SFX_SCRAPPER_CLUSTER_NAME",
-		},
-		cli.StringFlag{
-			Name:   dataSendRate,
-			Value:  "1s",
-			EnvVar: "SFX_SCRAPPER_SEND_RATE",
-			Usage:  fmt.Sprintf("Rate at which data is queried from cAdvisor and send to SignalFx. Possible values: %v", getMapKeys(dataSendRates)),
-		},
-		cli.IntFlag{
-			Name:   cadvisorPort,
-			Value:  4194,
-			EnvVar: "SFX_SCRAPPER_CADVISOR_PORT",
-			Usage:  fmt.Sprintf("Port on which cAdvisor listens."),
-		},
-		cli.StringFlag{
-			Name:   nodeServiceDiscoveryRate,
-			Value:  "5m",
-			EnvVar: "SFX_SCRAPPER_NODE_SERVICE_DISCOVERY_RATE",
-			Usage:  fmt.Sprintf("Rate at which nodes and services will be rediscovered. Possible values: %v", getMapKeys(nodeServiceDiscoveryRates)),
-		},
-	}
-
-	app.Action = func(c *cli.Context) {
-
-		paramAPIToken := c.String(apiToken)
-		if paramAPIToken == "" {
-			fmt.Fprintf(os.Stderr, "\nERROR: apiToken must be set.\n\n")
-			cli.ShowAppHelp(c)
-			os.Exit(1)
-		}
-
-		paramDataSendRate, ok := dataSendRates[c.String(dataSendRate)]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "\nERROR: dataSendRate must be one of: %v.\n\n", getMapKeys(dataSendRates))
-			cli.ShowAppHelp(c)
-			os.Exit(1)
-		}
-
-		paramNodeServiceDiscoveryRate, ok := nodeServiceDiscoveryRates[c.String(nodeServiceDiscoveryRate)]
-		if !ok {
-			fmt.Fprintf(os.Stderr, "\nERROR: nodeServiceDiscoveryRate must be one of: %v.\n\n", getMapKeys(nodeServiceDiscoveryRates))
-			cli.ShowAppHelp(c)
-			os.Exit(1)
-		}
-
-		paramClusterName := c.String(clusterName)
-		if paramClusterName == "" {
-			fmt.Fprintf(os.Stderr, "\nERROR: clusterName must be set.\n\n")
-			cli.ShowAppHelp(c)
-			os.Exit(1)
-		}
-
-		paramIngestURL := c.String(ingestURL)
-		if paramIngestURL == "" {
-			fmt.Fprintf(os.Stderr, "\nERROR: ingestUrl must be set.\n\n")
-			cli.ShowAppHelp(c)
-			os.Exit(1)
-		}
-
-		var instance = prometheusScraper{
-			forwarder: newSfxClient(paramIngestURL, paramAPIToken), //"PjzqXDrnlfCn2h1ClAvVig"
-			cfg: &Config{
-				IngestURL:              paramIngestURL,
-				APIToken:               paramAPIToken,
-				DataSendRate:           c.String(dataSendRate),
-				ClusterName:            paramClusterName,
-				NodeServiceRefreshRate: c.String(nodeServiceDiscoveryRate),
-				CadvisorPort:           c.Int(cadvisorPort),
+func init() {
+	app.Commands = append(app.Commands, cli.Command{
+		Name:   "run",
+		Usage:  "start the service (the default)",
+		Action: run,
+		Before: setupRun,
+		Flags: []cli.Flag{
+			cli.StringFlag{
+				Name:   "sfx-ingest-url",
+				EnvVar: "SFX_ENDPOINT",
+				Value:  "https://ingest.signalfx.com",
+				Usage:  "SignalFx ingest URL",
 			},
-		}
+			cli.StringFlag{
+				Name:   "sfx-api-token",
+				EnvVar: "SFX_API_TOKEN",
+				Usage:  "API token",
+			},
+			cli.StringFlag{
+				Name:   "cluster-name",
+				EnvVar: "CLUSTER_NAME",
+				Usage:  "Cluster name will appear as dimension",
+			},
+			cli.DurationFlag{
+				Name:   "send-interval",
+				EnvVar: "SEND_INTERVAL",
+				Value:  time.Second * 1,
+				Usage:  "Rate at which data is queried from cAdvisor and send to SignalFx",
+			},
+			cli.IntFlag{
+				Name:   "cadvisor-port",
+				EnvVar: "CADVISOR_PORT",
+				Value:  4194,
+				Usage:  "Port on which cAdvisor listens",
+			},
+			cli.DurationFlag{
+				Name:   "discovery-interval",
+				EnvVar: "NODE_SERVICE_DISCOVERY_INTERVAL",
+				Value:  time.Minute * 5,
+				Usage:  "Rate at which nodes and services will be rediscovered",
+			},
+		},
+	})
+}
 
-		if err := instance.main(paramDataSendRate, paramNodeServiceDiscoveryRate); err != nil {
-			fmt.Fprintf(os.Stderr, "%s\n", err.Error())
-			os.Exit(1)
-		}
-	}
-
+func setupRun(c *cli.Context) error {
 	re = regexp.MustCompile(`^k8s_(?P<kubernetes_container_name>[^_\.]+)[^_]+_(?P<kubernetes_pod_name>[^_]+)_(?P<kubernetes_namespace>[^_]+)`)
 	reCaptureNames = re.SubexpNames()
 
-	app.Run(os.Args)
+	sfxAPIToken = c.String("sfx-api-token")
+	if sfxAPIToken == "" {
+		cli.ShowAppHelp(c)
+		log.Fatal("API token is required")
+	}
+
+	clusterName = c.String("cluster-name")
+	if clusterName == "" {
+		cli.ShowAppHelp(c)
+		log.Fatal("cluster name is required")
+	}
+
+	sfxIngestURL = c.String("sfx-ingest-url")
+	sendInterval = c.Duration("send-interval")
+	cadvisorPort = c.Int("cadvisor-port")
+	discoveryInterval = c.Duration("discovery-interval")
+	return nil
+}
+
+func run(c *cli.Context) {
+	var instance = prometheusScraper{
+		forwarder: newSfxClient(sfxIngestURL, sfxAPIToken),
+		cfg: &Config{
+			IngestURL:              sfxIngestURL,
+			APIToken:               sfxAPIToken,
+			DataSendRate:           sendInterval,
+			ClusterName:            clusterName,
+			NodeServiceRefreshRate: discoveryInterval,
+			CadvisorPort:           cadvisorPort,
+		},
+	}
+
+	if err := instance.main(sendInterval, discoveryInterval); err != nil {
+		log.WithError(err).Fatal("failure")
+	}
 }
 
 func getMapKeys(m map[string]time.Duration) (keys []string) {
@@ -250,14 +211,9 @@ func getMapKeys(m map[string]time.Duration) (keys []string) {
 	return keys
 }
 
-func newSfxClient(ingestURL, authToken string) (forwarder *signalfx.Forwarder) {
-	forwarder = signalfx.NewSignalfxJSONForwarder(strings.Join([]string{ingestURL, "v2/datapoint"}, "/"), time.Second*10, authToken, 10, "", "", "") //http://lab-ingest.corp.signalfuse.com:8080
-	forwarder.UserAgent(fmt.Sprintf("SignalFxScrapper/1.0 (gover %s)", runtime.Version()))
-	return
+func newSfxClient(ingestURL, authToken string) *signalfx.Forwarder {
+	return signalfx.NewSignalfxJSONForwarder(strings.Join([]string{ingestURL, "v2/datapoint"}, "/"), time.Second*10, authToken, 10, "", "", "")
 }
-
-var re *regexp.Regexp
-var reCaptureNames []string
 
 func nameToLabel(name string) map[string]string {
 	extraLabels := map[string]string{}
@@ -271,9 +227,15 @@ func nameToLabel(name string) map[string]string {
 }
 
 func updateNodes(cPort int) (hostIPtoNodeMap map[string]kubeAPI.Node, nodeIPs []string) {
-	kubeClient, kubeErr := kube.NewInCluster()
+	kubeCfg, err := kube.InClusterConfig()
+	if err != nil {
+		log.WithError(err).Error("failed to create kube config")
+		return nil, nil
+	}
+	log.WithField("host", kubeCfg.Host).Info("connecting to kube api")
+	kubeClient, kubeErr := kube.New(kubeCfg)
 	if kubeErr != nil {
-		fmt.Printf("kubeErr: %v\n", kubeErr)
+		log.WithError(kubeErr).Error("failed to create kube client")
 		return nil, nil
 	}
 
@@ -281,7 +243,7 @@ func updateNodes(cPort int) (hostIPtoNodeMap map[string]kubeAPI.Node, nodeIPs []
 	nodeIPs = make([]string, 0, 2)
 	nodeList, apiErr := kubeClient.Nodes().List(kubeLabels.Everything(), kubeFields.Everything())
 	if apiErr != nil {
-		fmt.Printf("apiErr: %v\n", apiErr)
+		log.WithError(apiErr).Error("failed to get node list")
 	} else {
 		for _, node := range nodeList.Items {
 			var hostIP string
@@ -306,15 +268,21 @@ func updateNodes(cPort int) (hostIPtoNodeMap map[string]kubeAPI.Node, nodeIPs []
 }
 
 func updateServices() (podToServiceMap map[string]string) {
-	kubeClient, kubeErr := kube.NewInCluster()
+	kubeCfg, err := kube.InClusterConfig()
+	if err != nil {
+		log.WithError(err).Error("failed to create kube config")
+		return nil
+	}
+	log.WithField("host", kubeCfg.Host).Info("connecting to kube api")
+	kubeClient, kubeErr := kube.New(kubeCfg)
 	if kubeErr != nil {
-		fmt.Printf("kubeErr: %v\n", kubeErr)
+		log.WithError(kubeErr).Error("failed to create kube client")
 		return nil
 	}
 
-	serviceList, apiErr := kubeClient.Services("").List(kubeLabels.Everything(), kubeFields.Everything())
+	serviceList, apiErr := kubeClient.Services("").List(kubeLabels.Everything())
 	if apiErr != nil {
-		fmt.Printf("apiErr: %v\n", apiErr)
+		log.WithError(apiErr).Error("failed to get service list")
 		return nil
 	}
 
@@ -322,10 +290,9 @@ func updateServices() (podToServiceMap map[string]string) {
 	for _, service := range serviceList.Items {
 		podList, apiErr := kubeClient.Pods("").List(kubeLabels.SelectorFromSet(service.Spec.Selector), kubeFields.Everything())
 		if apiErr != nil {
-			fmt.Printf("apiErr: %v\n", apiErr)
+			log.WithError(apiErr).Error("failed to get pod list")
 		} else {
 			for _, pod := range podList.Items {
-				//fmt.Printf("%v -> %v\n", pod.ObjectMeta.Name, service.ObjectMeta.Name)
 				podToServiceMap[pod.ObjectMeta.Name] = service.ObjectMeta.Name
 			}
 		}
@@ -346,10 +313,7 @@ func (p *prometheusScraper) main(paramDataSendRate, paramNodeServiceDiscoveryRat
 		}
 	}
 
-	printVersion()
-	cfg, _ := json.MarshalIndent(p.cfg, "", "  ")
-	fmt.Printf("Scrapper started with following params:\n%v\n", string(cfg))
-
+	log.Info("scraper started")
 	scrapWorkCache := newScrapWorkCache(p.cfg, p.forwarder)
 	stop := make(chan error, 1)
 
@@ -401,7 +365,7 @@ func (p *prometheusScraper) main(paramDataSendRate, paramNodeServiceDiscoveryRat
 				for serverURL := range hostMapCopy {
 					cadvisorClient, localERR := client.NewClient(serverURL)
 					if localERR != nil {
-						fmt.Printf("Failed connect to server: %v\n", localERR)
+						log.WithError(localERR).Error("failed connect to cadvisor server")
 						continue
 					}
 
@@ -414,7 +378,7 @@ func (p *prometheusScraper) main(paramDataSendRate, paramNodeServiceDiscoveryRat
 					})
 				}
 			} else {
-				fmt.Printf("No new nodes appeared.\n")
+				log.Info("no new nodes appeared")
 			}
 
 			scrapWorkCache.setPodToServiceMap(podMap)
@@ -463,7 +427,7 @@ func (swc *scrapWorkCache) buildWorkList(URLList []string) {
 	for _, serverURL := range URLList {
 		cadvisorClient, localERR := client.NewClient(serverURL)
 		if localERR != nil {
-			fmt.Printf("Failed connect to server: %v\n", localERR)
+			log.WithError(localERR).Error("failed connect to cadvisor server")
 			continue
 		}
 
@@ -513,7 +477,7 @@ func (swc *scrapWorkCache) fillNodeDims(chosen int, dims map[string]string) {
 		defer func() {
 			swc.mutex.Unlock()
 			if r := recover(); r != nil {
-				fmt.Println("Recovered in fillNodeDims: ", r)
+				log.WithField("r", r).Info("recovered in fillNodeDims")
 			}
 		}()
 
@@ -581,7 +545,7 @@ func (swc *scrapWorkCache) waitAndForward() {
 			}
 		}
 
-		metricName := prometheusMetric.Desc().MetricName()
+		metricName := prometheusMetric.Desc().String()
 		timestamp := time.Unix(0, tsMs*time.Millisecond.Nanoseconds())
 
 		for _, conv := range scrapper.ConvertMeric(&pMetric) {
