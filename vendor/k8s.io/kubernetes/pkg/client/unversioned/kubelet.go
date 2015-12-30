@@ -18,10 +18,10 @@ package unversioned
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 
-	"k8s.io/kubernetes/pkg/client/transport"
-	"k8s.io/kubernetes/pkg/util"
+	"k8s.io/kubernetes/pkg/api/validation"
 )
 
 // KubeletClient is an interface for all kubelet functionality
@@ -40,20 +40,25 @@ type HTTPKubeletClient struct {
 }
 
 func MakeTransport(config *KubeletConfig) (http.RoundTripper, error) {
-	tlsConfig, err := transport.TLSConfigFor(config.transportConfig())
+	cfg := &Config{TLSClientConfig: config.TLSClientConfig}
+	if config.EnableHttps {
+		hasCA := len(config.CAFile) > 0 || len(config.CAData) > 0
+		if !hasCA {
+			cfg.Insecure = true
+		}
+	}
+	tlsConfig, err := TLSConfigFor(cfg)
 	if err != nil {
 		return nil, err
 	}
-
-	rt := http.DefaultTransport
 	if config.Dial != nil || tlsConfig != nil {
-		rt = util.SetTransportDefaults(&http.Transport{
+		return &http.Transport{
 			Dial:            config.Dial,
 			TLSClientConfig: tlsConfig,
-		})
+		}, nil
+	} else {
+		return http.DefaultTransport, nil
 	}
-
-	return transport.HTTPWrappersForConfig(config.transportConfig(), rt)
 }
 
 // TODO: this structure is questionable, it should be using client.Config and overriding defaults.
@@ -73,6 +78,9 @@ func NewKubeletClient(config *KubeletConfig) (KubeletClient, error) {
 }
 
 func (c *HTTPKubeletClient) GetConnectionInfo(host string) (string, uint, http.RoundTripper, error) {
+	if ok, msg := validation.ValidateNodeName(host, false); !ok {
+		return "", 0, nil, fmt.Errorf("invalid node name: %s", msg)
+	}
 	scheme := "http"
 	if c.Config.EnableHttps {
 		scheme = "https"

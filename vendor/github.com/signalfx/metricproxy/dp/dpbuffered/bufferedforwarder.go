@@ -8,10 +8,10 @@ import (
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/signalfx/golib/datapoint"
+	"github.com/signalfx/golib/datapoint/dplocal"
+	"github.com/signalfx/golib/datapoint/dpsink"
 	"github.com/signalfx/golib/event"
 	"github.com/signalfx/metricproxy/config"
-	"github.com/signalfx/metricproxy/dp/dplocal"
-	"github.com/signalfx/metricproxy/dp/dpsink"
 	"golang.org/x/net/context"
 )
 
@@ -58,7 +58,7 @@ type BufferedForwarder struct {
 
 var _ dpsink.Sink = &BufferedForwarder{}
 
-// ErrBufferFull is returned by BufferedForwarder.AddDatapoints if the sink's buffer is full
+// ErrDPBufferFull is returned by BufferedForwarder.AddDatapoints if the sink's buffer is full
 var ErrDPBufferFull = errors.New("unable to send more datapoints.  Buffer full")
 
 // AddDatapoints sends the datapoints to a chan buffer that eventually is flushed in big groups
@@ -78,7 +78,7 @@ func (forwarder *BufferedForwarder) AddDatapoints(ctx context.Context, points []
 	}
 }
 
-// ErrBufferFull is returned by BufferedForwarder.AddEvents if the sink's buffer is full
+// ErrEBufferFull is returned by BufferedForwarder.AddEvents if the sink's buffer is full
 var ErrEBufferFull = errors.New("unable to send more events.  Buffer full")
 
 // AddEvents sends the events to a chan buffer that eventually is flushed in big groups

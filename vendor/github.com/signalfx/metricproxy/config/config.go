@@ -34,17 +34,19 @@ type ForwardTo struct {
 
 // ListenFrom configures how we listen for datapoints to forward
 type ListenFrom struct {
-	Type                       string
-	ListenAddr                 *string
-	MetricDeconstructor        *string
-	MetricDeconstructorOptions *string
-	Timeout                    *string
-	Name                       *string
-	ListenPath                 *string
-	JSONEngine                 *string
-	Encrypted                  *bool
-	TimeoutDuration            *time.Duration `json:"-"`
-	ServerAcceptDeadline       *time.Duration `json:"-"`
+	Type                           string
+	ListenAddr                     *string
+	Dimensions                     map[string]string
+	MetricDeconstructor            *string
+	MetricDeconstructorOptions     *string
+	MetricDeconstructorOptionsJSON map[string]interface{}
+	Timeout                        *string
+	Name                           *string
+	ListenPath                     *string
+	JSONEngine                     *string
+	Encrypted                      *bool
+	TimeoutDuration                *time.Duration `json:"-"`
+	ServerAcceptDeadline           *time.Duration `json:"-"`
 }
 
 func (listenFrom *ListenFrom) String() string {
@@ -69,6 +71,7 @@ type ProxyConfig struct {
 	LogMaxSize         *int
 	LogMaxBackups      *int
 	LogFormat          *string
+	LogLevel           *string
 }
 
 func decodeConfig(configBytes []byte) (*ProxyConfig, error) {

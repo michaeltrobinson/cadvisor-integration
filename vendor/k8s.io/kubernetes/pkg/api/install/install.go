@@ -30,7 +30,7 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/meta"
 	"k8s.io/kubernetes/pkg/api/registered"
-	"k8s.io/kubernetes/pkg/api/unversioned"
+	apiutil "k8s.io/kubernetes/pkg/api/util"
 	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/runtime"
 )
@@ -48,24 +48,20 @@ func init() {
 		glog.V(4).Infof("%v", err)
 		return
 	}
-
-	worstToBestGroupVersions := []unversioned.GroupVersion{}
-
 	// Use the first API version in the list of registered versions as the latest.
 	registeredGroupVersions := registered.GroupVersionsForGroup("")
 	groupVersion := registeredGroupVersions[0]
 	*groupMeta = latest.GroupMeta{
-		GroupVersion: groupVersion.String(),
-		Group:        groupVersion.Group,
-		Version:      groupVersion.Version,
-		Codec:        runtime.CodecFor(api.Scheme, groupVersion.String()),
+		GroupVersion: groupVersion,
+		Group:        apiutil.GetGroup(groupVersion),
+		Version:      apiutil.GetVersion(groupVersion),
+		Codec:        runtime.CodecFor(api.Scheme, groupVersion),
 	}
 	var versions []string
 	var groupVersions []string
 	for i := len(registeredGroupVersions) - 1; i >= 0; i-- {
-		versions = append(versions, registeredGroupVersions[i].Version)
-		groupVersions = append(groupVersions, registeredGroupVersions[i].String())
-		worstToBestGroupVersions = append(worstToBestGroupVersions, registeredGroupVersions[i])
+		versions = append(versions, apiutil.GetVersion(registeredGroupVersions[i]))
+		groupVersions = append(groupVersions, registeredGroupVersions[i])
 	}
 	groupMeta.Versions = versions
 	groupMeta.GroupVersions = groupVersions
@@ -74,11 +70,13 @@ func init() {
 
 	// the list of kinds that are scoped at the root of the api hierarchy
 	// if a kind is not enumerated here, it is assumed to have a namespace scope
+	// the list of kinds that are scoped at the root of the api hierarchy
+	// if a kind is not enumerated here, it is assumed to have a namespace scope
 	rootScoped := sets.NewString(
 		"Node",
+		"Minion",
 		"Namespace",
 		"PersistentVolume",
-		"ComponentStatus",
 	)
 
 	// these kinds should be excluded from the list of resources
@@ -94,7 +92,7 @@ func init() {
 		"ThirdPartyResourceData",
 		"ThirdPartyResourceList")
 
-	mapper := api.NewDefaultRESTMapper(worstToBestGroupVersions, interfacesFor, importPrefix, ignoredKinds, rootScoped)
+	mapper := api.NewDefaultRESTMapper("", versions, interfacesFor, importPrefix, ignoredKinds, rootScoped)
 	// setup aliases for groups of resources
 	mapper.AddResourceAlias("all", userResources...)
 	groupMeta.RESTMapper = mapper

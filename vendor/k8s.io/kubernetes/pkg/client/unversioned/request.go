@@ -32,7 +32,6 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/api/validation"
 	"k8s.io/kubernetes/pkg/client/metrics"
 	"k8s.io/kubernetes/pkg/conversion/queryparams"
 	"k8s.io/kubernetes/pkg/fields"
@@ -150,10 +149,6 @@ func (r *Request) Resource(resource string) *Request {
 		r.err = fmt.Errorf("resource already set to %q, cannot change to %q", r.resource, resource)
 		return r
 	}
-	if ok, msg := validation.IsValidPathSegmentName(resource); !ok {
-		r.err = fmt.Errorf("invalid resource %q: %s", resource, msg)
-		return r
-	}
 	r.resource = resource
 	return r
 }
@@ -168,12 +163,6 @@ func (r *Request) SubResource(subresources ...string) *Request {
 	if len(r.subresource) != 0 {
 		r.err = fmt.Errorf("subresource already set to %q, cannot change to %q", r.resource, subresource)
 		return r
-	}
-	for _, s := range subresources {
-		if ok, msg := validation.IsValidPathSegmentName(s); !ok {
-			r.err = fmt.Errorf("invalid subresource %q: %s", s, msg)
-			return r
-		}
 	}
 	r.subresource = subresource
 	return r
@@ -192,10 +181,6 @@ func (r *Request) Name(resourceName string) *Request {
 		r.err = fmt.Errorf("resource name already set to %q, cannot change to %q", r.resourceName, resourceName)
 		return r
 	}
-	if ok, msg := validation.IsValidPathSegmentName(resourceName); !ok {
-		r.err = fmt.Errorf("invalid resource name %q: %s", resourceName, msg)
-		return r
-	}
 	r.resourceName = resourceName
 	return r
 }
@@ -209,10 +194,6 @@ func (r *Request) Namespace(namespace string) *Request {
 		r.err = fmt.Errorf("namespace already set to %q, cannot change to %q", r.namespace, namespace)
 		return r
 	}
-	if ok, msg := validation.IsValidPathSegmentName(namespace); !ok {
-		r.err = fmt.Errorf("invalid namespace %q: %s", namespace, msg)
-		return r
-	}
 	r.namespaceSet = true
 	r.namespace = namespace
 	return r
@@ -223,6 +204,23 @@ func (r *Request) NamespaceIfScoped(namespace string, scoped bool) *Request {
 	if scoped {
 		return r.Namespace(namespace)
 	}
+	return r
+}
+
+// UnversionedPath strips the apiVersion from the baseURL before appending segments.
+func (r *Request) UnversionedPath(segments ...string) *Request {
+	if r.err != nil {
+		return r
+	}
+	upath := path.Clean(r.baseURL.Path)
+	//TODO(jdef) this is a pretty hackish version test
+	if strings.HasPrefix(path.Base(upath), "v") {
+		upath = path.Dir(upath)
+		if upath == "." {
+			upath = "/"
+		}
+	}
+	r.path = path.Join(append([]string{upath}, segments...)...)
 	return r
 }
 
@@ -309,13 +307,13 @@ type versionToResourceToFieldMapping map[string]resourceTypeToFieldMapping
 func (v versionToResourceToFieldMapping) filterField(apiVersion, resourceType, field, value string) (newField, newValue string, err error) {
 	rMapping, ok := v[apiVersion]
 	if !ok {
-		glog.Warningf("Field selector: %v - %v - %v - %v: need to check if this is versioned correctly.", apiVersion, resourceType, field, value)
+		glog.Warningf("field selector: %v - %v - %v - %v: need to check if this is versioned correctly.", apiVersion, resourceType, field, value)
 		return field, value, nil
 	}
 	newField, newValue, err = rMapping.filterField(resourceType, field, value)
 	if err != nil {
 		// This is only a warning until we find and fix all of the client's usages.
-		glog.Warningf("Field selector: %v - %v - %v - %v: need to check if this is versioned correctly.", apiVersion, resourceType, field, value)
+		glog.Warningf("field selector: %v - %v - %v - %v: need to check if this is versioned correctly.", apiVersion, resourceType, field, value)
 		return field, value, nil
 	}
 	return newField, newValue, nil
@@ -324,33 +322,33 @@ func (v versionToResourceToFieldMapping) filterField(apiVersion, resourceType, f
 var fieldMappings = versionToResourceToFieldMapping{
 	"v1": resourceTypeToFieldMapping{
 		"nodes": clientFieldNameToAPIVersionFieldName{
-			ObjectNameField:   ObjectNameField,
-			NodeUnschedulable: NodeUnschedulable,
+			ObjectNameField:   "metadata.name",
+			NodeUnschedulable: "spec.unschedulable",
 		},
 		"pods": clientFieldNameToAPIVersionFieldName{
-			PodHost:   PodHost,
-			PodStatus: PodStatus,
+			PodHost:   "spec.nodeName",
+			PodStatus: "status.phase",
 		},
 		"secrets": clientFieldNameToAPIVersionFieldName{
-			SecretType: SecretType,
+			SecretType: "type",
 		},
 		"serviceAccounts": clientFieldNameToAPIVersionFieldName{
-			ObjectNameField: ObjectNameField,
+			ObjectNameField: "metadata.name",
 		},
 		"endpoints": clientFieldNameToAPIVersionFieldName{
-			ObjectNameField: ObjectNameField,
+			ObjectNameField: "metadata.name",
 		},
 		"events": clientFieldNameToAPIVersionFieldName{
-			ObjectNameField:              ObjectNameField,
-			EventReason:                  EventReason,
-			EventSource:                  EventSource,
-			EventInvolvedKind:            EventInvolvedKind,
-			EventInvolvedNamespace:       EventInvolvedNamespace,
-			EventInvolvedName:            EventInvolvedName,
-			EventInvolvedUID:             EventInvolvedUID,
-			EventInvolvedAPIVersion:      EventInvolvedAPIVersion,
-			EventInvolvedResourceVersion: EventInvolvedResourceVersion,
-			EventInvolvedFieldPath:       EventInvolvedFieldPath,
+			ObjectNameField:              "metadata.name",
+			EventReason:                  "reason",
+			EventSource:                  "source",
+			EventInvolvedKind:            "involvedObject.kind",
+			EventInvolvedNamespace:       "involvedObject.namespace",
+			EventInvolvedName:            "involvedObject.name",
+			EventInvolvedUID:             "involvedObject.uid",
+			EventInvolvedAPIVersion:      "involvedObject.apiVersion",
+			EventInvolvedResourceVersion: "involvedObject.resourceVersion",
+			EventInvolvedFieldPath:       "involvedObject.fieldPath",
 		},
 	},
 }
@@ -458,19 +456,6 @@ func (r *Request) Timeout(d time.Duration) *Request {
 		return r
 	}
 	r.timeout = d
-	return r
-}
-
-// Timeout makes the request use the given duration as a timeout. Sets the "timeoutSeconds"
-// parameter.
-func (r *Request) TimeoutSeconds(d time.Duration) *Request {
-	if r.err != nil {
-		return r
-	}
-	if d != 0 {
-		timeout := int64(d.Seconds())
-		r.Param("timeoutSeconds", strconv.FormatInt(timeout, 10))
-	}
 	return r
 }
 
@@ -586,7 +571,6 @@ func (r *Request) Watch() (watch.Interface, error) {
 		client = http.DefaultClient
 	}
 	resp, err := client.Do(req)
-	updateURLMetrics(r, resp, err)
 	if err != nil {
 		// The watch stream mechanism handles many common partial data errors, so closed
 		// connections can be retried in many cases.
@@ -602,23 +586,6 @@ func (r *Request) Watch() (watch.Interface, error) {
 		return nil, fmt.Errorf("for request '%+v', got status: %v", url, resp.StatusCode)
 	}
 	return watch.NewStreamWatcher(watchjson.NewDecoder(resp.Body, r.codec)), nil
-}
-
-// updateURLMetrics is a convenience function for pushing metrics.
-// It also handles corner cases for incomplete/invalid request data.
-func updateURLMetrics(req *Request, resp *http.Response, err error) {
-	url := "none"
-	if req.baseURL != nil {
-		url = req.baseURL.Host
-	}
-
-	// If we have an error (i.e. apiserver down) we report that as a metric label.
-	if err != nil {
-		metrics.RequestResult.WithLabelValues(err.Error(), req.verb, url).Inc()
-	} else {
-		//Metrics for failure codes
-		metrics.RequestResult.WithLabelValues(strconv.Itoa(resp.StatusCode), req.verb, url).Inc()
-	}
 }
 
 // Stream formats and executes the request, and offers streaming of the response.
@@ -639,7 +606,6 @@ func (r *Request) Stream() (io.ReadCloser, error) {
 		client = http.DefaultClient
 	}
 	resp, err := client.Do(req)
-	updateURLMetrics(r, resp, err)
 	if err != nil {
 		return nil, err
 	}
@@ -672,16 +638,10 @@ func (r *Request) Stream() (io.ReadCloser, error) {
 }
 
 // request connects to the server and invokes the provided function when a server response is
-// received. It handles retry behavior and up front validation of requests. It will invoke
+// received. It handles retry behavior and up front validation of requests. It wil invoke
 // fn at most once. It will return an error if a problem occurred prior to connecting to the
 // server - the provided function is responsible for handling server errors.
 func (r *Request) request(fn func(*http.Request, *http.Response)) error {
-	//Metrics for total request latency
-	start := time.Now()
-	defer func() {
-		metrics.RequestLatency.WithLabelValues(r.verb, r.finalURLTemplate()).Observe(metrics.SinceInMicroseconds(start))
-	}()
-
 	if r.err != nil {
 		return r.err
 	}
@@ -712,7 +672,6 @@ func (r *Request) request(fn func(*http.Request, *http.Response)) error {
 		req.Header = r.headers
 
 		resp, err := client.Do(req)
-		updateURLMetrics(r, resp, err)
 		if err != nil {
 			return err
 		}
@@ -746,6 +705,10 @@ func (r *Request) request(fn func(*http.Request, *http.Response)) error {
 //  * If the server responds with a status: *errors.StatusError or *errors.UnexpectedObjectError
 //  * http.Client.Do errors are returned directly.
 func (r *Request) Do() Result {
+	start := time.Now()
+	defer func() {
+		metrics.RequestLatency.WithLabelValues(r.verb, r.finalURLTemplate()).Observe(metrics.SinceInMicroseconds(start))
+	}()
 	var result Result
 	err := r.request(func(req *http.Request, resp *http.Response) {
 		result = r.transformResponse(resp, req)
@@ -758,6 +721,10 @@ func (r *Request) Do() Result {
 
 // DoRaw executes the request but does not process the response body.
 func (r *Request) DoRaw() ([]byte, error) {
+	start := time.Now()
+	defer func() {
+		metrics.RequestLatency.WithLabelValues(r.verb, r.finalURLTemplate()).Observe(metrics.SinceInMicroseconds(start))
+	}()
 	var result Result
 	err := r.request(func(req *http.Request, resp *http.Response) {
 		result.body, result.err = ioutil.ReadAll(resp.Body)
@@ -859,10 +826,7 @@ func isTextResponse(resp *http.Response) bool {
 // checkWait returns true along with a number of seconds if the server instructed us to wait
 // before retrying.
 func checkWait(resp *http.Response) (int, bool) {
-	switch r := resp.StatusCode; {
-	// any 500 error code and 429 can trigger a wait
-	case r == errors.StatusTooManyRequests, r >= 500:
-	default:
+	if resp.StatusCode != errors.StatusTooManyRequests {
 		return 0, false
 	}
 	i, ok := retryAfterSeconds(resp)

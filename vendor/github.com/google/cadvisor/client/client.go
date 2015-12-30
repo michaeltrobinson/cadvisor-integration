@@ -25,8 +25,9 @@ import (
 	"path"
 	"strings"
 
-	"github.com/golang/glog"
 	info "github.com/google/cadvisor/info/v1"
+
+	"github.com/golang/glog"
 )
 
 // Client represents the base URL for a cAdvisor client.
@@ -160,9 +161,9 @@ func (self *Client) httpGetJsonData(data, postData interface{}, url, infoName st
 	var err error
 
 	if postData != nil {
-		data, err := json.Marshal(postData)
-		if err != nil {
-			return fmt.Errorf("unable to marshal data: %v", err)
+		data, marshalErr := json.Marshal(postData)
+		if marshalErr != nil {
+			return fmt.Errorf("unable to marshal data: %v", marshalErr)
 		}
 		resp, err = http.Post(url, "application/json", bytes.NewBuffer(data))
 	} else {
