@@ -18,13 +18,13 @@ spec:
       containers:
       - env:
         - name: SFX_ENDPOINT
-          value: "https://ingest.signalfx.com"
+          value: "https://ingest.signalfx.com/v2/datapoint"
         - name: SFX_API_TOKEN
           value: ""
         - name: CLUSTER_NAME
           value: "us-west-2a"
         - name: SEND_INTERVAL
-          value: "2m"
+          value: "3m"
         - name: CADVISOR_PORT
           value: "4194"
         - name: NODE_SERVICE_DISCOVERY_INTERVAL
@@ -33,6 +33,8 @@ spec:
           value: ""
         - name: KUBE_PASS
           value: ""
+        - name: MAX_DATAPOINTS
+          vaue: "50"
         image: michaeltrobinson/signalfx-cadvisord:latest
         imagePullPolicy: Always
         name: scraper
